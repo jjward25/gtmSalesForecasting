@@ -1,0 +1,134 @@
+import os
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import accuracy_score, classification_report
+import xgboost as xgb
+import shap
+import matplotlib.pyplot as plt
+from imblearn.over_sampling import SMOTE
+
+
+# Path of the file to read
+absolute_path = os.path.dirname(__file__)
+file_path = absolute_path + '/sampleOpptyData.xlsx'
+
+# Load data from Sheet1
+data = pd.read_excel(file_path, sheet_name='Sheet1')
+
+# Preview the data
+print("Initial Data Preview:")
+print(data.head(5))
+
+# Step 1: Filter data into training and prediction sets
+# Use rows with Status 'Lost' or 'Won' for training
+training_data = data[data['Status'].isin(['Lost', 'Won'])]
+
+# Use rows with Status 'Open' for prediction
+prediction_data = data[data['Status'] == 'Open']
+
+# Step 2: Exclude irrelevant columns
+exclude_columns = ['OpportunityID', 'Status', 'Start Date', 'DaysToClose', 'Deal Age', 'Stage','AuthorityIsChampion','PrimaryContactRole','UseCase','PackageTier']
+X = training_data.drop(exclude_columns, axis=1)
+y = training_data['Status']
+
+# Manual encoding mappings
+manual_encodings = {
+    'UseCase': {'UseCaseA': 0, 'UseCaseB': 1, 'UseCaseC': 2, 'UseCaseAB': 3, 'Other': 3, 'UseCaseAC': 4, 'UseCaseBC': 5, 'UseCaseABC': 6},
+    'PrimaryContactRole': {'Team Lead': 2, 'Exec': 3, 'TeamMemberCanBuy': 1, 'TeamMemberNoBuy': 0},
+    'CompanySize': {'0-250': 0, '250-1000': 1, '1k-10k': 2, '10k+': 3},
+    'PackageTier': {'Tier1': 0, 'Tier2': 1, 'Tier3': 2},
+    'AboveAvgCloseTime': {True: 1, False: 0},
+    'AuthorityIsChampion': {'Yes': 1, 'Null': 0},
+    'DiscountPercent': {'0': 0, '5': 1, '10': 2, '20+': 3},
+    'Revenue': {'<500k': 0, '<1m': 1, '1-5m': 2, '5m+': 2},
+    'Authority': {'Null': 0, 'Other': 1, 'PrimaryContact': 2},
+}
+
+# Encode categorical features manually
+categorical_columns = ['UseCase', 'Revenue', 'Authority', 'PrimaryContactRole', 'CompanySize', 'PackageTier',
+                       'AboveAvgCloseTime', 'AuthorityIsChampion', 'DiscountPercent']
+for col in categorical_columns:
+    if col in X.columns:
+        X[col] = X[col].map(manual_encodings[col])
+
+# Ensure data types are numeric
+X = X.apply(pd.to_numeric, errors='coerce')
+X.fillna(0, inplace=True)  # Handle missing values
+
+# Encode the target variable
+status_encoder = LabelEncoder()
+y = status_encoder.fit_transform(y)
+
+# Step 3: Train-test split for evaluation
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Calculate scale_pos_weight for XGBoost
+scale_pos_weight = len(y_train[y_train == 0]) / len(y_train[y_train == 1])
+
+# Train the model with class weight adjustment
+xgb_model = xgb.XGBClassifier(scale_pos_weight=scale_pos_weight, random_state=42, use_label_encoder=False, eval_metric='mlogloss')
+xgb_model.fit(X_train, y_train)
+
+# Evaluate XGBoost
+y_pred_xgb = xgb_model.predict(X_test)
+print("XGBoost Model Performance:")
+print("Accuracy:", accuracy_score(y_test, y_pred_xgb))
+print("Classification Report:\n", classification_report(y_test, y_pred_xgb))
+
+# SHAP Explainer for XGBoost
+explainer_xgb = shap.TreeExplainer(xgb_model)
+shap_values_xgb = explainer_xgb.shap_values(X_train)
+
+shap.summary_plot(shap_values_xgb, X_train)
+plt.title("SHAP Summary Plot - XGBoost")
+plt.show()
+
+
+
+# Step 5: Prepare prediction data
+X_pred = prediction_data.drop(exclude_columns, axis=1)
+
+# Encode categorical features for prediction
+for col in categorical_columns:
+    if col in X_pred.columns:
+        X_pred[col] = X_pred[col].map(manual_encodings[col])
+
+# Ensure prediction data has the same columns as training data
+X_pred = X_pred.apply(pd.to_numeric, errors='coerce')
+X_pred.fillna(0, inplace=True)
+
+# Step 6: Make predictions for 'Open' opportunities
+predicted_status_xgb = xgb_model.predict(X_pred)
+
+# Inverse transform predictions
+predicted_status_labels_xgb = status_encoder.inverse_transform(predicted_status_xgb)
+
+# Attach predictions to the original data
+prediction_data['Predicted_Status_XGB'] = predicted_status_labels_xgb
+
+print("Predicted Outcomes for Open Opportunities:")
+print(prediction_data[['OpportunityID', 'Predicted_Status_XGB']])
+
+# Save predictions to a new file
+output_file_path = absolute_path + '/Predicted_Open_Opportunities_All_Models.xlsx'
+prediction_data[['OpportunityID', 'Predicted_Status_XGB']].to_excel(output_file_path, index=False)
+print(f"Predictions saved to {output_file_path}")
+
+# Apply SMOTE to oversample the minority class and run predictions again
+smote = SMOTE(random_state=42)
+X_train_resampled, y_train_resampled = smote.fit_resample(X_train, y_train)
+
+# Train the model with class weight adjustment
+xgb_model = xgb.XGBClassifier(scale_pos_weight=scale_pos_weight, random_state=42, use_label_encoder=False, eval_metric='mlogloss')
+xgb_model.fit(X_train_resampled, y_train_resampled)
+
+# Evaluate XGBoost
+y_pred_xgb = xgb_model.predict(X_test)
+print("XGBoost Model Performance (SMOTE):")
+print("Accuracy:", accuracy_score(y_test, y_pred_xgb))
+print("Classification Report:\n", classification_report(y_test, y_pred_xgb))
+
+# SHAP Explainer for XGBoost
+explainer_xgb = shap.TreeExplainer(xgb_model)
+shap_values_xgb = explainer_xgb.shap_values(X_train_resampled)
